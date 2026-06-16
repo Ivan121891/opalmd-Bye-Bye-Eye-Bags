@@ -17,6 +17,12 @@
     version:    '2021-07-28',
   };
 
+  // Lead store ingestion endpoint. This page is Vercel-hosted, so a relative
+  // /api/lead would hit Vercel (no such endpoint) and never reach the VPS store.
+  // Point at the VPS leads-capi (Caddy-fronted -> :3020, CORS:*). Repoint this
+  // single constant to a dedicated leads.* subdomain when one is set up.
+  const LEADS_API = 'https://est-non-surgical-fneck.ilovefacialtreatment.com';
+
   const BUSINESS_TZ = "America/Los_Angeles";
 
   // Build specific time slots
@@ -281,7 +287,7 @@
       // Persist the lead + chosen slot BEFORE any GHL call (non-blocking).
       var leadId = null;
       try {
-        const _leadRes = await fetch('/api/lead', {
+        const _leadRes = await fetch(LEADS_API + '/api/lead', {
           method: 'POST', headers: { 'Content-Type': 'application/json' }, keepalive: true,
           body: JSON.stringify({
             locationId: GHL.locationId,
@@ -332,7 +338,7 @@
       // not a booking — record 'lead_only' so the store never over-counts success.
       const bookingStatus = appointmentId ? 'success' : 'lead_only';
       try {
-        fetch('/api/lead/result', {
+        fetch(LEADS_API + '/api/lead/result', {
           method: 'POST', headers: { 'Content-Type': 'application/json' }, keepalive: true,
           body: JSON.stringify({ leadId: leadId, locationId: GHL.locationId, status: bookingStatus, appointmentId: appointmentId, eventId: (typeof eventId !== 'undefined' ? eventId : null), scheduleFired: (!TEST && bookingStatus === 'success'), test: TEST }),
         }).catch(function () {});
@@ -350,7 +356,7 @@
     } catch (err) {
       console.error("GHL booking error", err);
       try {
-        fetch('/api/lead/result', {
+        fetch(LEADS_API + '/api/lead/result', {
           method: 'POST', headers: { 'Content-Type': 'application/json' }, keepalive: true,
           body: JSON.stringify({ leadId: leadId, locationId: GHL.locationId, status: 'fail', error: (err && err.message) ? err.message : String(err), test: TEST }),
         }).catch(function () {});
