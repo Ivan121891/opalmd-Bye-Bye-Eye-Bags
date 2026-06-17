@@ -17,15 +17,11 @@
     version:    '2021-07-28',
   };
 
-  // Lead store ingestion endpoint. This page is Vercel-hosted, so a relative
-  // /api/lead would hit Vercel (no such endpoint) and never reach the VPS store.
-  // Point at the VPS leads-capi (Caddy-fronted -> :3020, CORS:*). Repoint this
-  // single constant to a dedicated leads.* subdomain when one is set up.
-  const LEADS_API = 'https://est-non-surgical-fneck.ilovefacialtreatment.com';
+  const DEDICATED_PIXEL_ID = '1553108116391961'; // Opal Pixel (opalmd unique)
 
   const BUSINESS_TZ = "America/Los_Angeles";
 
-  // Build specific time slots
+  // Fixed appointment slots (last appointment 4:45 PM, ends within close)
   function buildAllSlots() {
     return [
       { label: '10:00 AM', hour: 10, minute: 0 },
@@ -130,8 +126,11 @@
 
     const cells = [];
     const cursor = new Date(today);
-    for (let i = 0; i < 6; i++) {
-      cells.push(new Date(cursor));
+    while (cells.length < 6) {
+      const dow = cursor.getDay();
+      if (dow !== 6) {
+        cells.push(new Date(cursor));
+      }
       cursor.setDate(cursor.getDate() + 1);
     }
 
@@ -172,8 +171,8 @@
       });
     }
 
-    // Morning block (9 AM - 11 AM)
-    const morning = ALL_SLOTS.filter(s => s.hour >= 9 && s.hour <= 11);
+    // Morning block (10 AM - 11 AM)
+    const morning = ALL_SLOTS.filter(s => s.hour >= 10 && s.hour <= 11);
     const morningAvail = filterPast(morning);
     morningGrid.innerHTML = "";
     if (morningAvail.length > 0) {
@@ -189,8 +188,8 @@
       morningGrid.innerHTML = '<p style="font-size:.8rem;color:var(--muted-foreground);text-align:center;grid-column:1/-1;padding:6px 0;">No available morning slots</p>';
     }
 
-    // Afternoon block (12 PM - 5 PM)
-    const afternoon = ALL_SLOTS.filter(s => s.hour >= 12 && s.hour <= 17);
+    // Afternoon block (12 PM - 4 PM)
+    const afternoon = ALL_SLOTS.filter(s => s.hour >= 12 && s.hour <= 16);
     const afternoonAvail = filterPast(afternoon);
     afternoonGrid.innerHTML = "";
     if (afternoonAvail.length > 0) {
@@ -229,9 +228,20 @@
 
   function track(event, params) {
     if (typeof window.fbq === "function") {
-      try { window.fbq("track", event, params || {}); } catch (_) {}
+      try { window.fbq("trackSingle", "1178133073434960", event, params || {}); } catch (_) {}
     }
   }
+  function trackDedicated(event, params, eventId) {
+    if (typeof window.fbq === "function") {
+      try {
+        var opts = eventId ? { eventID: eventId } : {};
+        window.fbq("trackSingle", DEDICATED_PIXEL_ID, event, params || {}, opts);
+      } catch (_) {}
+    }
+  }
+  (function fireViewContent() {
+    trackDedicated("ViewContent", { content_name: SERVICE_NAME });
+  })();
 
   // ------- Back buttons -------
   document.querySelectorAll(".back-btn").forEach((btn) => {
@@ -282,12 +292,16 @@
     const [firstName, ...rest] = name.split(/\s+/);
     const lastName = rest.join(" ");
 
+    // One eventId per conversion — shared by browser dedicated pixel (eventID)
+    // and server CAPI (event_id) so Meta can dedup. In scope for the whole flow.
+    const eventId = 'sched_' + Date.now() + '_' + Math.random().toString(36).slice(2);
+
     try {
       // 1) Upsert contact in GHL
       // Persist the lead + chosen slot BEFORE any GHL call (non-blocking).
       var leadId = null;
       try {
-        const _leadRes = await fetch(LEADS_API + '/api/lead', {
+        const _leadRes = await fetch('/api/lead', {
           method: 'POST', headers: { 'Content-Type': 'application/json' }, keepalive: true,
           body: JSON.stringify({
             locationId: GHL.locationId,
@@ -301,6 +315,7 @@
             fbclid: (new URLSearchParams(location.search)).get('fbclid') || undefined,
             fbp: (document.cookie.match(/_fbp=([^;]+)/) || [])[1],
             fbc: (document.cookie.match(/_fbc=([^;]+)/) || [])[1],
+            eventId: eventId,
             test: TEST,
           }),
         });
@@ -313,8 +328,8 @@
         lastName: lastName || '-',
         email,
         phone,
-        source: 'Opal MD - Bye Bye Eye Bags',
-        tags: TEST ? ['Bye Bye Eye Bags', 'TEST-DONOTCOUNT'] : ['Bye Bye Eye Bags'],
+        source: 'Opal MD Korean Facial LP',
+        tags: TEST ? ['Korean Facial', 'TEST-DONOTCOUNT'] : ['Korean Facial'],
       });
       const contactId = contactRes.contact?.id || contactRes.id;
 
@@ -328,8 +343,9 @@
         assignedUserId: GHL.userId,
         startTime:      isoInTz(start, BUSINESS_TZ),
         endTime:        isoInTz(end,   BUSINESS_TZ),
-        title:          `${name} — Bye Bye Eye Bags`,
+        title:          `${name} — Korean Facial`,
         selectedTimezone: BUSINESS_TZ,
+        appointmentStatus: 'new',
       });
 
       const appointmentId = (_aptRes && (_aptRes.id || _aptRes.appointmentId || (_aptRes.appointment && _aptRes.appointment.id))) || null;
@@ -338,14 +354,17 @@
       // not a booking — record 'lead_only' so the store never over-counts success.
       const bookingStatus = appointmentId ? 'success' : 'lead_only';
       try {
-        fetch(LEADS_API + '/api/lead/result', {
+        fetch('/api/lead/result', {
           method: 'POST', headers: { 'Content-Type': 'application/json' }, keepalive: true,
           body: JSON.stringify({ leadId: leadId, locationId: GHL.locationId, status: bookingStatus, appointmentId: appointmentId, eventId: (typeof eventId !== 'undefined' ? eventId : null), scheduleFired: (!TEST && bookingStatus === 'success'), test: TEST }),
         }).catch(function () {});
       } catch (_) {}
 
-      track("Lead", { content_name: SERVICE_NAME });
-      if (!TEST && bookingStatus === 'success') track("Schedule", { content_name: SERVICE_NAME });
+      try {
+        track("Lead", { content_name: SERVICE_NAME });
+        if (!TEST && bookingStatus === 'success') track("Schedule", { content_name: SERVICE_NAME });
+        if (!TEST && bookingStatus === 'success') trackDedicated("Schedule", { content_name: SERVICE_NAME }, eventId);
+      } catch (_) { /* tracking must NEVER block or fail the booking */ }
 
       renderConfirmation({
         service: SERVICE_NAME,
@@ -356,7 +375,7 @@
     } catch (err) {
       console.error("GHL booking error", err);
       try {
-        fetch(LEADS_API + '/api/lead/result', {
+        fetch('/api/lead/result', {
           method: 'POST', headers: { 'Content-Type': 'application/json' }, keepalive: true,
           body: JSON.stringify({ leadId: leadId, locationId: GHL.locationId, status: 'fail', error: (err && err.message) ? err.message : String(err), test: TEST }),
         }).catch(function () {});
